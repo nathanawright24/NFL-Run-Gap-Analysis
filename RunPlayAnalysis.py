@@ -4,8 +4,6 @@ Created on Tue Nov 19 10:04:33 2024
 
 @author: NAWri
 """
-pip install nfl_data_py
-pip install matplotlib
 
 import nfl_data_py as nfl
 import pandas as pd
@@ -21,7 +19,8 @@ columns = ['run_location','run_gap','yardline_100','game_seconds_remaining',
            'goal_to_go','ydstogo','yards_gained','play_type','shotgun',
            'no_huddle','no_score_prob','opp_fg_prob','opp_td_prob','fg_prob',
            'td_prob','wp','def_wp','penalty','drive_play_count','drive_time_of_possession',
-           'div_game','roof','surface','temp','defenders_in_box','offense_personnel',]
+           'div_game','roof','surface','temp','defenders_in_box','offense_personnel',
+           'offense_formation','epa']
 runplaysfiltered = run_filtered[columns]
 
 # change grass to be binary grass or turf
@@ -33,7 +32,146 @@ runplaysfiltered['grass'] = runplaysfiltered['grass'].apply(lambda x: 1 if x in 
 
 # Modify the 'roof' variable to be binary with outdoors and open being 1, else being 0
 runplaysfiltered['roof'] = runplaysfiltered['roof'].apply(lambda x: 1 if x in ['outdoors', 'open'] else 0)
+#-----------------------------------------------------------------------------------------
+# Generating Personnel Groupings
+# Function to extract the number of RBs, TEs, and WRs from the 'offense_personnel' string
+import re
 
+def extract_personnel_counts(personnel):
+    positions = {'RB': 0, 'TE': 0, 'WR': 0}
+    if pd.isna(personnel):
+        return pd.Series(positions)
+
+    # Use regex to find all occurrences of "number + position"
+    matches = re.findall(r'(\d+)\s*(RB|TE|WR)', personnel)
+    
+    for count, position in matches:
+        positions[position] = int(count)
+
+    return pd.Series(positions)
+
+# Apply function to create new columns
+runplaysfiltered[['RB_count', 'TE_count', 'WR_count']] = runplaysfiltered['offense_personnel'].apply(extract_personnel_counts)
+#-----------------------------------------------------------------------------------------
+shotgunruns = runplaysfiltered[runplaysfiltered['shotgun']==1.0]
+undercenter = runplaysfiltered[runplaysfiltered['shotgun']==0.0]
+# changing invalid empty sets to shotgun
+# Create a new DataFrame to store the updated rows
+updatedshotgun = shotgunruns.copy()
+
+# Iterate through the rows where the formation is 'EMPTY'
+for idx, row in updatedshotgun[updatedshotgun['offense_formation'] == 'EMPTY'].iterrows():
+    # Check if there is more than 1 running back or tight end
+    if row['RB_count'] > 1 or row['TE_count'] > 1:
+        # Change formation to 'SHOTGUN'
+        updatedshotgun.at[idx, 'offense_formation'] = 'SHOTGUN'
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Filter down to necessary columns for grouping (assuming you've already done this with updatedshotgun, empty, and pistol)
+# Group by offense formation, RB_count, TE_count to calculate YPC and EPA
+personnel_stats = updatedshotgun.groupby(['offense_formation', 'RB_count', 'TE_count']).agg(
+    YPC=('yards_gained', 'mean'),
+    EPA=('epa', 'mean')
+).reset_index()
+
+# Get unique formations
+formations = personnel_stats['offense_formation'].unique()
+
+# Create a clustered bar graph for each formation
+for formation in formations:
+    data = personnel_stats[personnel_stats['offense_formation'] == formation]
+    
+    # Sort by TE count first, then RB count for better visualization
+    data = data.sort_values(by=['TE_count', 'RB_count'])
+    
+    # Create a new 'personnel_combo' column for labeling purposes
+    data['personnel_combo'] = data.apply(lambda row: f"{row['TE_count']} TE, {row['RB_count']} RB", axis=1)
+    
+    # Create the figure and axis for plotting
+    plt.figure(figsize=(10, 6))
+    
+    # Plot YPC (blue) and EPA (orange)
+    sns.barplot(data=data, x='personnel_combo', y='YPC', color='blue', label='YPC')
+    sns.barplot(data=data, x='personnel_combo', y='EPA', color='orange', label='EPA', alpha=0.6)
+
+    # Set labels and title
+    plt.xlabel('Personnel Packages (TE count → RB count)')
+    plt.ylabel('Metric Value')
+    plt.title(f'Run Performance in {formation} Formation')
+    
+    # Rotate x-axis labels for better readability
+    plt.xticks(rotation=45)
+    
+    # Show legend
+    plt.legend(title="Metrics")
+    
+    # Display the plot
+    plt.tight_layout()
+    plt.show()
+
+"""
+# Filter for 11 personnel (1 RB, 1 TE)
+run_11p = runplaysfiltered[(runplaysfiltered['RB_count'] == 1) & (runplaysfiltered['TE_count'] == 1)]
+
+# Group by formation and calculate YPC and EPA
+formation_stats = run_11p.groupby('offense_formation').agg(
+    YPC=('yards_gained', 'mean'),
+    EPA=('epa', 'mean')  # Change 'wp' to 'epa' if available in your dataset
+).reset_index()
+
+print(formation_stats.head())  # Check the output
+"""
+#----------------------------------------------------------------------------------------
+"""
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Filter down to necessary columns for grouping
+personnel_stats = runplaysfiltered.groupby(['offense_formation', 'RB_count', 'TE_count']).agg(
+    YPC=('yards_gained', 'mean'),
+    EPA=('epa', 'mean')
+).reset_index()
+
+# Get unique formations
+valid_personnel = {
+    'Jumbo': [(1, 4), (2, 3), (3, 2)],  # Heavy TE/RB sets
+    'Singleback': [(1, 0), (1, 1), (1, 2), (1, 3), (2, 0), (2, 1)],  # Typically 1-2 RBs, no FB
+    'I_Form': [(1, 1), (1, 2), (1, 3), (2, 1), (2, 2)],  # Common RB/TE distributions
+    'Shotgun': [(1, 0), (1, 1), (1, 2), (1, 3), (2, 0), (2, 1), (2, 2)],  # 1-2 RBs allowed
+    'Pistol': [(1, 0), (1, 1), (1, 2), (1, 3), (2, 0), (2, 1), (2, 2)],  # Similar to Shotgun
+    'Goal Line': [(1, 3), (1, 4), (2, 3)],  # Heavy personnel only
+}
+filtered_personnel_stats = personnel_stats[
+    personnel_stats.apply(lambda row: (row['RB_count'], row['TE_count']) in valid_personnel.get(row['offense_formation'], []), axis=1)
+]
+# Create a clustered bar graph for each formation
+for formation in valid_personnel.keys():
+    data = filtered_personnel_stats[filtered_personnel_stats['offense_formation'] == formation]
+    
+    # Sort by TE count first, then RB count for better visualization
+    data = data.sort_values(by=['TE_count', 'RB_count'])
+    
+    # Combine TE count and RB count as labels for the x-axis
+    data['personnel_combo'] = [f"{te} TE, {rb} RB" for te, rb in zip(data['TE_count'], data['RB_count'])]
+    
+    plt.figure(figsize=(10, 6))
+    
+    # Plot YPC (blue) and EPA (orange)
+    sns.barplot(data=data, x='personnel_combo', y='YPC', color='blue', label='YPC')
+    sns.barplot(data=data, x='personnel_combo', y='EPA', color='orange', label='EPA')
+    
+    # Set labels and title
+    plt.xlabel('Personnel Packages (TE count → RB count)')
+    plt.ylabel('Metric Value')
+    plt.title(f'Run Performance in {formation} Formation')
+    
+    # Rotate x-axis labels for better readability
+    plt.xticks(rotation=45)
+    plt.legend()
+    plt.show()
+"""
 #-----------------------------------------------------------------------------------------
 #------------------------------- Exploratory Graphics ------------------------------------
 #-----------------------------------------------------------------------------------------
@@ -245,7 +383,7 @@ def assign_run_gap_number(run_location, run_gap):
 # Apply function to dataset
 runplaysfiltered['run_gap_number'] = runplaysfiltered.apply(lambda row: assign_run_gap_number(row['run_location'], row['run_gap']), axis=1)
 
-# Define order of gaps
+# Define the desired order of gaps
 gap_order = [5, 3, 1, 0, 2, 4, 6]
 
 # Convert 'numerical_run_gap' to a categorical variable with a specified order
@@ -318,184 +456,3 @@ plot_ypc_by_run_gap(own20to40, 'Own 20 to 40')
 plot_ypc_by_run_gap(midfield, 'Midfield')
 plot_ypc_by_run_gap(opp40to20, 'Opponent 40 to 20')
 plot_ypc_by_run_gap(oppredzone, 'Opponent Red Zone')
-
-#------------------------------------------------------------------------------------------------------------
-#------------------------------------------- YPC by OL Grade ------------------------------------------------
-#------------------------------------------------------------------------------------------------------------
-import pandas as pd
-stats21 = pd.read_csv("C:/Users/natha/Documents/BGA/Summer2024/4th_Down_Prob/2021Stats.csv")
-stats22 = pd.read_csv("C:/Users/natha/Documents/BGA/Summer2024/4th_Down_Prob/2022Stats.csv")
-stats23 = pd.read_csv("C:/Users/natha/Documents/BGA/Summer2024/4th_Down_Prob/2023Stats.csv")
-OLColumns = ['Year','Team','OLRank','PFFOL']
-combined_stats = pd.concat([stats21, stats22, stats23], ignore_index=True)
-OLStats = combined_stats[OLColumns]
-OLStats = OLStats.rename(columns={
-    'Team': 'posteam',
-    'Year':'season'
-})
-run_filtered = pd.merge(
-    run_filtered,
-    OLStats,
-    left_on=['posteam', 'season'],
-    right_on=['posteam', 'season'],
-    how='left'
-)
-columns = ['run_location','run_gap','yardline_100','game_seconds_remaining',
-           'quarter_seconds_remaining','half_seconds_remaining','down',
-           'goal_to_go','ydstogo','yards_gained','play_type','shotgun',
-           'no_huddle','no_score_prob','opp_fg_prob','opp_td_prob','fg_prob',
-           'td_prob','wp','def_wp','penalty','drive_play_count','drive_time_of_possession',
-           'div_game','roof','surface','temp','defenders_in_box','offense_personnel','OLRank','PFFOL']
-runplaysfiltered = run_filtered[columns]
-
-yards_gained_OL = runplaysfiltered.groupby('OLRank')['yards_gained'].mean().reset_index()
-import numpy as np
-import matplotlib as mpl
-import matplotlib.pyplot as plt
-# Extract x and y values
-x = yards_gained_OL['OLRank']
-y = yards_gained_OL['yards_gained']
-
-# Fit a linear trend line
-z = np.polyfit(x, y, 1)
-p = np.poly1d(z)
-
-# Plot the YPC by temperature
-plt.figure(figsize=(10, 6))
-plt.plot(x, y, marker='o', linestyle='-', label='Yards Gained')
-plt.plot(x, p(x), "r--", label='Trend Line')  # Trend line
-
-plt.title('Change in Yards per Carry with O Line Rank')
-plt.xlabel('OLRank')
-plt.ylabel('Yards Gained')
-plt.legend()
-plt.grid(True)
-plt.show()
-print(f"Slope of the trend line: {z[0]}")
-
-#--------------------------------------------------------------------------------------------------------------
-#-------------------------------------------- YPC feature testing ---------------------------------------------
-#--------------------------------------------------------------------------------------------------------------
-
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.model_selection import train_test_split, cross_val_score, KFold
-from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
-from sklearn.metrics import mean_squared_error
-from sklearn.impute import SimpleImputer
-
-# Define predictors and target variable
-features = [
-    'numerical_run_gap',  # Run gap
-    'yardline_100',       # Field position
-    'roof',               # Roof type (binary or categorical)
-    'surface',            # Surface type
-    'field_segment'       # Segmented field position
-]
-target = 'yards_gained'
-
-# Create field_segment feature if not already created
-if 'field_segment' not in runplaysfiltered.columns:
-    runplaysfiltered['field_segment'] = pd.cut(
-        runplaysfiltered['yardline_100'], 
-        bins=[0, 20, 40, 60, 80, 100], 
-        labels=['oppredzone', 'opp40to20', 'midfield', 'own20to40', 'insideown20']
-    )
-
-# Extract relevant data and drop rows with missing target
-data = runplaysfiltered[features + [target]].dropna(subset=[target])
-
-# Separate predictors (X) and target (y)
-X = data[features]
-y = data[target]
-
-# Identify categorical and numerical features
-categorical_features = ['roof', 'surface', 'field_segment']
-numerical_features = ['numerical_run_gap', 'yardline_100']
-
-# Define the preprocessing steps with imputation
-preprocessor = ColumnTransformer(
-    transformers=[
-        ('num', Pipeline([
-            ('imputer', SimpleImputer(strategy='mean')),  # Impute missing numerical values with mean
-            ('scaler', StandardScaler())                 # Scale numerical features
-        ]), numerical_features),
-        ('cat', Pipeline([
-            ('imputer', SimpleImputer(strategy='most_frequent')),  # Impute missing categorical values with mode
-            ('onehot', OneHotEncoder(handle_unknown='ignore'))     # One-hot encode categorical features
-        ]), categorical_features)
-    ]
-)
-
-# Split into train and test sets
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42
-)
-
-# Define the model pipeline with imputation
-model = Pipeline(steps=[
-    ('preprocessor', preprocessor),
-    ('regressor', RandomForestRegressor(n_estimators=100, random_state=42))
-])
-
-# Define cross-validation strategy
-kfold = KFold(n_splits=5, shuffle=True, random_state=42)
-
-# Perform cross-validation with error handling
-try:
-    cv_scores = cross_val_score(
-        model, X_train, y_train, cv=kfold, scoring='neg_mean_squared_error'
-    )
-    
-    # Calculate RMSE from cross-validation scores
-    cv_rmse = np.sqrt(-cv_scores)
-    print(f"Mean RMSE from cross-validation: {cv_rmse.mean():.2f} (+/- {cv_rmse.std():.2f})")
-except ValueError as e:
-    print("Error during cross-validation:", e)
-
-# Fit the model on the training set
-model.fit(X_train, y_train)
-
-# Predict on the test set
-y_pred = model.predict(X_test)
-
-# Calculate RMSE on the test set
-test_rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-print(f"Test RMSE: {test_rmse:.2f}")
-
-# Extract feature names after preprocessing
-# Get numerical feature names
-num_features = numerical_features
-
-# Get categorical feature names from one-hot encoding
-cat_features = model.named_steps['preprocessor'].transformers_[1][1].named_steps['onehot'].get_feature_names_out(categorical_features)
-
-# Combine all feature names
-all_features = list(num_features) + list(cat_features)
-
-# Extract feature importances from the Random Forest model
-importances = model.named_steps['regressor'].feature_importances_
-
-# Create a DataFrame for visualization
-feature_importances_df = pd.DataFrame({
-    'Feature': all_features,
-    'Importance': importances
-}).sort_values(by='Importance', ascending=False)
-
-# Display top 10 feature importances
-print("\nTop 10 Feature Importances:")
-print(feature_importances_df.head(10))
-
-# Plot feature importances
-plt.figure(figsize=(12, 8))
-plt.barh(feature_importances_df['Feature'], feature_importances_df['Importance'], color='skyblue')
-plt.xlabel('Importance')
-plt.title('Feature Importance in Predicting Yards Per Carry (YPC)')
-plt.gca().invert_yaxis()  # Highest importance at the top
-plt.tight_layout()
-plt.show()
